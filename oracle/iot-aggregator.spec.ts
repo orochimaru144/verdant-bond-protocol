@@ -83,12 +83,12 @@ describe('aggregateSensorReadings', () => {
 });
 
 describe('aggregateIotProject', () => {
-  it('produces a validated IOT-SENSORS report with evidence hash', async () => {
+  it('produces a validated IOT_SENSORS report with evidence hash', async () => {
     const http = new MockHttpClient([{ status: 200, data: { readings: READINGS } }]);
     const report = await aggregateIotProject(PROJECT, PERIOD, { baseUrl: BASE_URL, http });
 
     expect(report.project_id).toBe('VCS-1234');
-    expect(report.methodology).toBe('IOT-SENSORS');
+    expect(report.methodology).toBe('IOT_SENSORS');
     expect(report.period_start).toBe('2025-01-01');
     expect(report.period_end).toBe('2025-03-31');
     expect(report.ipfs_evidence_hash).toMatch(/^Qm[1-9A-HJ-NP-Za-km-z]{44}$/);
