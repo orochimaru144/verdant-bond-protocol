@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, ChangeDetectionStrategy, signal, output, effect } from '@angular/core';
+import { Component, inject, OnInit, ChangeDetectionStrategy, signal, output, effect, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { forkJoin, of } from 'rxjs';
@@ -6,6 +6,7 @@ import { catchError } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { WalletService } from '../../../auth/wallet.service';
 import { QuoteAsset } from '../../interfaces/bond.interface';
+import { appErrorMessage } from '../../errors/api-error';
 
 export interface QuoteBalances {
   USDC: number;
@@ -139,9 +140,11 @@ export class QuoteBalanceComponent implements OnInit {
   amount = 0;
 
   constructor() {
+    // Re-load when the wallet connects. loadBalances writes signals, so it runs
+    // untracked: the effect depends only on isConnected (NG0600 otherwise).
     effect(() => {
       if (this.walletService.isConnected()) {
-        this.loadBalances();
+        untracked(() => this.loadBalances());
       }
     });
   }
@@ -172,8 +175,8 @@ export class QuoteBalanceComponent implements OnInit {
       xlmWallet: this.apiService.getWalletBalance('XLM').pipe(catchError(() => of({ balance: 0 }))),
     }).subscribe({
       next: (res) => {
-        this.balances.set({ USDC: res.usdcEscrow.balance, XLM: res.xlmEscrow.balance });
-        this.walletBalances.set({ USDC: res.usdcWallet.balance, XLM: res.xlmWallet.balance });
+        this.balances.set({ USDC: Number(res.usdcEscrow.balance), XLM: Number(res.xlmEscrow.balance) });
+        this.walletBalances.set({ USDC: Number(res.usdcWallet.balance), XLM: Number(res.xlmWallet.balance) });
         this.loading.set(false);
         this.balanceChange.emit(this.balances());
       },
@@ -206,9 +209,10 @@ export class QuoteBalanceComponent implements OnInit {
         this.loadBalances();
       },
       error: (err) => {
-        this.actionError.set(
-          err.error?.detail || err.message || (this.mode() === 'deposit' ? 'Deposit failed' : 'Withdraw failed'),
-        );
+        this.actionError.set(appErrorMessage(
+          err,
+          this.mode() === 'deposit' ? 'Deposit failed' : 'Withdraw failed',
+        ));
         this.submitting.set(false);
       },
     });

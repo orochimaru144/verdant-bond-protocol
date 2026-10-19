@@ -1,3 +1,5 @@
+import { QuoteAssetSymbol } from '../quote-assets';
+
 export enum OrderStatus {
   Open = 'Open',
   PartiallyFilled = 'PartiallyFilled',
@@ -6,7 +8,12 @@ export enum OrderStatus {
   Expired = 'Expired',
 }
 
-export type QuoteAsset = 'USDC' | 'XLM';
+/**
+ * Kept as an alias of the canonical registry's symbol type (see
+ * ../quote-assets.ts) rather than its own literal union, so this and the
+ * DTOs can never drift out of sync (issue #92).
+ */
+export type QuoteAsset = QuoteAssetSymbol;
 
 export interface OrderResponse {
   id: number;
@@ -17,6 +24,8 @@ export interface OrderResponse {
   quoteAsset: QuoteAsset;
   status: OrderStatus;
   createdAt: string;
+  expiresAt: string;
+  transactionHash?: string;
 }
 
 export interface QuoteBalanceResponse {
@@ -34,6 +43,7 @@ export interface QuoteTransactionResponse {
 
 export interface PriceFeedResponse {
   bondId: number;
+  quoteAsset: QuoteAsset;
   bestPrice: string;
   averagePrice: string;
   totalOrders: number;
@@ -48,6 +58,34 @@ export interface PriceLevel {
 
 export type FillabilityStatus = 'fully_fillable' | 'partially_fillable' | 'unfillable';
 
+export type LiquidityTier = 'LIQUID' | 'MODERATE' | 'ILLIQUID';
+
+export interface PriceImpactConfig {
+  illiquidThresholdAmount: string;
+  moderateThresholdAmount: string;
+  tierImpactLimitsBps: Record<LiquidityTier, number>;
+  maxIlliquidDepthConsumptionBps: number;
+}
+
+export interface PriceImpactEvaluation {
+  bondId: number;
+  requestedAmount: string;
+  quoteAsset: QuoteAsset;
+  liquidityTier: LiquidityTier;
+  availableDepth: string;
+  bestPrice: string;
+  marginalPrice: string;
+  averageExecutionPrice: string;
+  totalCost: string;
+  priceImpactBps: number;
+  maxAllowedImpactBps: number;
+  isAllowed: boolean;
+  depthConsumptionRatioBps: number;
+  maxDepthConsumptionBps: number;
+  reason?: string;
+  suggestedMaxAmount?: string;
+}
+
 export interface SlippageResponse {
   bondId: number;
   requestedAmount: string;
@@ -58,3 +96,4 @@ export interface SlippageResponse {
   slippagePercent: number;
   fillabilityStatus: FillabilityStatus;
 }
+

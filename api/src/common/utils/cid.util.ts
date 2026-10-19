@@ -1,44 +1,93 @@
-import { createHash } from 'crypto';
+/**
+ * Evidence hash / CID encoding for on-chain storage (issue #93).
+ *
+ * Exactly two formats are defined as supported, both resolving to exactly
+ * 32 bytes to match the contract's `ipfs_evidence_hash: BytesN<32>` field
+ * (`contracts/oracle-consumer/src/lib.rs`):
+ *
+ *  - CIDv0: `Qm` + 44 base58btc characters, decoding to the 34-byte
+ *    multihash `0x12 0x20 <32-byte SHA-256 digest>`. The 2-byte multihash
+ *    prefix is stripped; only the digest is stored on-chain. This is the
+ *    only format `hashEvidence()` in `ipfs/evidence.ts` (used by every
+ *    provider adapter) ever produces, and the only format
+ *    `oracle/validator.ts`'s `validateForOnChain` accepts.
+ *  - A raw 64-character hex string (32-byte SHA-256 digest), matching what
+ *    `sha256Hex` in `ipfs/evidence.ts` and the existing hex-encoded
+ *    `ipfsHash`/`counterEvidenceHash` report fields already use.
+ *
+ * CIDv1 is deliberately **not** supported: nothing in this codebase's
+ * adapters, validators, or IPFS pinning path ever produces one, and a
+ * correct general CIDv1 parser needs multibase-prefix and varint-codec
+ * handling this system has no use for. A CIDv1-shaped string is one of the
+ * "unsupported CID" cases this issue's tests cover -- it is rejected the
+ * same as any other malformed input, not partially parsed.
+ *
+ * Anything that isn't one of the two supported formats -- wrong length,
+ * invalid encoding, an unsupported CID version -- is rejected by throwing,
+ * rather than silently substituted with a hash of the input string (this
+ * function's prior behavior). Nothing in this codebase currently calls
+ * `encodeCid`/`decodeCid`/`isValidCid` (confirmed by search), so tightening
+ * this contract has zero blast radius on existing callers.
+ */
+
+const CIDV0_PREFIX = Buffer.from([0x12, 0x20]);
+const DIGEST_LENGTH = 32;
+
+export class InvalidEvidenceReferenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidEvidenceReferenceError';
+  }
+}
 
 /**
- * Encode a CID string to bytes for contract storage.
- * Supports CIDv0 (base58) and CIDv1 (base32) formats.
- * Falls back to SHA-256 hash if CID is invalid.
+ * Attempts to extract the 32-byte digest from a CIDv0 or raw hex evidence
+ * reference. Returns `null` (never throws) for anything else, including a
+ * well-formed but unsupported CID version -- pure, synchronous, O(n) in the
+ * length of `cid`, no I/O.
  */
-export function encodeCid(cid: string): Buffer {
-  if (!cid || typeof cid !== 'string') {
-    throw new Error('Invalid CID: must be a non-empty string');
-  }
+function tryExtractDigest(cid: string): Buffer | null {
+  if (typeof cid !== 'string' || cid.length === 0) return null;
 
-  // Try to decode as base58 (CIDv0)
-  try {
-    const bytes = base58Decode(cid);
-    if (bytes.length === 34 && bytes[0] === 0x12 && bytes[1] === 0x20) {
-      // Valid CIDv0: 0x12 0x20 + 32-byte SHA-256 hash
-      return Buffer.from(bytes);
-    }
-  } catch {
-    // Not valid base58
-  }
-
-  // Try to decode as base32 (CIDv1)
-  try {
-    const decoded = base32Decode(cid);
-    if (decoded.length > 0) {
-      return Buffer.from(decoded);
-    }
-  } catch {
-    // Not valid base32
-  }
-
-  // If it's a hex string already, use it directly
-  if (/^[0-9a-fA-F]+$/.test(cid) && cid.length % 2 === 0) {
+  if (/^[0-9a-fA-F]{64}$/.test(cid)) {
     return Buffer.from(cid, 'hex');
   }
 
-  // Fallback: hash the CID string with SHA-256
-  console.warn(`Invalid CID format: ${cid}, using SHA-256 hash`);
-  return createHash('sha256').update(cid).digest();
+  if (/^Qm[1-9A-HJ-NP-Za-km-z]{44}$/.test(cid)) {
+    let decoded: Uint8Array;
+    try {
+      decoded = base58Decode(cid);
+    } catch {
+      return null;
+    }
+    if (decoded.length === 34 && decoded[0] === 0x12 && decoded[1] === 0x20) {
+      return Buffer.from(decoded.slice(2));
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Encode a supported evidence reference (CIDv0 or raw hex digest) to the
+ * 32-byte digest used for on-chain contract storage. Throws
+ * `InvalidEvidenceReferenceError` for anything that does not resolve to
+ * exactly a 32-byte digest in a supported format -- see the module doc
+ * comment above for exactly what is and is not accepted.
+ */
+export function encodeCid(cid: string): Buffer {
+  if (!cid || typeof cid !== 'string') {
+    throw new InvalidEvidenceReferenceError('Invalid evidence reference: must be a non-empty string');
+  }
+
+  const digest = tryExtractDigest(cid);
+  if (!digest || digest.length !== DIGEST_LENGTH) {
+    throw new InvalidEvidenceReferenceError(
+      `Invalid evidence reference: "${cid}" is not a supported CIDv0 or ` +
+      `64-character hex SHA-256 digest`,
+    );
+  }
+  return digest;
 }
 
 /**
@@ -50,7 +99,7 @@ export function decodeCid(bytes: Uint8Array): string {
     return '';
   }
 
-  // Check if it's a valid CIDv0 (34 bytes: 0x12 0x20 + 32-byte hash)
+  // Check if it's already a valid CIDv0 multihash (34 bytes: 0x12 0x20 + 32-byte digest)
   if (bytes.length === 34 && bytes[0] === 0x12 && bytes[1] === 0x20) {
     return base58Encode(bytes);
   }
@@ -60,13 +109,11 @@ export function decodeCid(bytes: Uint8Array): string {
     return base32Encode(bytes);
   }
 
-  // If it's 32 bytes, treat it as a raw SHA-256 hash and create CIDv0
-  if (bytes.length === 32) {
-    const cidv0 = new Uint8Array(34);
-    cidv0[0] = 0x12; // SHA-256
-    cidv0[1] = 0x20; // 32 bytes
-    cidv0.set(bytes, 2);
-    return base58Encode(cidv0);
+  // The on-chain evidence hash is stored as a bare 32-byte digest (see
+  // `encodeCid`, issue #93) -- reconstruct the CIDv0 it came from by
+  // re-prefixing the sha2-256 multihash header.
+  if (bytes.length === DIGEST_LENGTH) {
+    return base58Encode(Buffer.concat([CIDV0_PREFIX, bytes]));
   }
 
   // For other lengths, try base32 encoding
@@ -74,34 +121,14 @@ export function decodeCid(bytes: Uint8Array): string {
 }
 
 /**
- * Validate if a string is a valid CID.
+ * Validate whether `cid` is a supported evidence reference (issue #93):
+ * CIDv0 or a raw 64-character hex SHA-256 digest -- i.e. whether
+ * `encodeCid(cid)` would succeed. Pure and synchronous; does not check
+ * retrievability (see `docs/oracle-design.md`'s evidence section for why
+ * that is a deliberately separate, optional, network-dependent check).
  */
 export function isValidCid(cid: string): boolean {
-  if (!cid || typeof cid !== 'string') {
-    return false;
-  }
-
-  // CIDv0 (base58)
-  try {
-    const bytes = base58Decode(cid);
-    if (bytes.length === 34 && bytes[0] === 0x12 && bytes[1] === 0x20) {
-      return true;
-    }
-  } catch {
-    // Not valid base58
-  }
-
-  // CIDv1 (base32)
-  try {
-    const decoded = base32Decode(cid);
-    if (decoded.length > 2 && decoded[0] === 0x01) {
-      return true;
-    }
-  } catch {
-    // Not valid base32
-  }
-
-  return false;
+  return tryExtractDigest(cid) !== null;
 }
 
 // Base58 encoding/decoding (Bitcoin alphabet)
@@ -181,27 +208,4 @@ function base32Encode(buffer: Uint8Array): string {
   }
 
   return output;
-}
-
-function base32Decode(str: string): Uint8Array {
-  const bytes: number[] = [];
-  let bits = 0;
-  let value = 0;
-
-  for (let i = 0; i < str.length; i++) {
-    const c = BASE32_ALPHABET.indexOf(str[i].toUpperCase());
-    if (c < 0) {
-      throw new Error(`Invalid base32 character: ${str[i]}`);
-    }
-
-    value = (value << 5) | c;
-    bits += 5;
-
-    if (bits >= 8) {
-      bytes.push((value >>> (bits - 8)) & 255);
-      bits -= 8;
-    }
-  }
-
-  return new Uint8Array(bytes);
 }

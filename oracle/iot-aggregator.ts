@@ -201,5 +201,15 @@ export async function aggregateIotProject(
       avg_soil_carbon_ppm: aggregate.avgSoilCarbonPpm,
       avg_water_table_cm: aggregate.avgWaterTableCm,
     },
+    raw_observations: {
+      device_ids: validatedProject.device_ids,
+      sample_count: aggregate.sampleCount,
+      device_count: aggregate.deviceCount,
+    },
+    transformation_parameters: {
+      area_ha: validatedProject.area_ha,
+      soil_carbon_delta_ppm: soilCarbonDeltaPpm,
+      kg_co2e_per_ha_per_ppm: KG_CO2E_PER_HA_PER_PPM,
+    },
   });
 }

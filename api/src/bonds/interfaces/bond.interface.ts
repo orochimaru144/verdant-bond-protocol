@@ -28,6 +28,9 @@ export interface BondResponse {
   totalSubscribed: string;
   status: BondStatusEnum;
   createdAt: string;
+  /** Only present on the response to a just-submitted issuance (see
+   *  BondsService.create); absent on reads. */
+  transactionHash?: string;
 }
 
 export interface HeldBondResponse extends BondResponse {
@@ -41,10 +44,20 @@ export interface SubscriptionResponse {
   transactionHash: string;
 }
 
+export interface HolderResponse {
+  address: string;
+  balance: string;
+}
+
 export interface HolderListResponse {
   bondId: number;
-  holders: Array<{ address: string; balance: string }>;
+  holders: HolderResponse[];
   total: number;
+}
+
+export interface HolderResponse {
+  address: string;
+  balance: string;
 }
 
 export interface CouponDistributionResponse {
@@ -74,8 +87,68 @@ export interface UndistributedTotalResponse {
   undistributedTotal: string;
 }
 
+/**
+ * One itemized claimable-credit line (issue #156). Mirrors the coupon-engine
+ * `ClaimableCreditDetail` struct: a single period/report/credit-type accrual
+ * for a holder. `amount` is in credit minor units (6 decimals, #157).
+ */
+export interface ClaimableCreditDetail {
+  periodIndex: number;
+  reportId: number;
+  startTime: number;
+  endTime: number;
+  creditType: string;
+  amount: string;
+}
+
+export interface ClaimableCreditsResponse {
+  bondId: number;
+  address: string;
+  total: string;
+  details: ClaimableCreditDetail[];
+}
+
 export interface SweepUndistributedResponse {
   bondId: number;
   swept: string;
   transactionHash: string;
+}
+
+export interface CouponBatchStatusResponse {
+  bondId: number;
+  periodIndex: number;
+  cursor: number;
+  totalHolders: number;
+  distributed: boolean;
+  totalCreditsEarned: string;
+  undistributed: string;
+  remainingHolders: number;
+}
+
+export interface CouponBatchDistributionResponse {
+  bondId: number;
+  periodIndex: number;
+  offset: number;
+  limit: number;
+  processedCount: number;
+  cursor: number;
+  batchComplete: boolean;
+  totalCredits: string;
+  transactionHash: string;
+}
+
+
+/**
+ * Consolidated, atomically-fetched bond detail (issue #4). A single call returns
+ * the bond summary, holders, coupon undistributed total, and maturity status so
+ * the frontend can refresh every panel together and never render a mix of
+ * pre- and post-mutation data. `loadedAt` is the server timestamp used by the
+ * client refresh model to detect staleness.
+ */
+export interface BondDetailResponse {
+  bond: BondResponse;
+  holders: HolderResponse[];
+  coupon: { undistributedTotal: string };
+  maturity: { reached: boolean; date: number; secondsUntil: number };
+  loadedAt: string;
 }

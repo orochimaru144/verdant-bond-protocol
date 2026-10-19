@@ -44,6 +44,7 @@
 - [API Reference](#-api-reference)
 - [Testing](#-testing)
 - [Deployment](#-deployment)
+- [Reproducible Builds](#reproducible-builds)
 - [Governance](#-governance)
 - [Compliance & KYC](#-compliance--kyc)
 - [Roadmap](#-roadmap)
@@ -566,7 +567,7 @@ The standalone adapters in `oracle/` poll real upstream endpoints, validate ever
 | IoT            | `oracle/iot-aggregator.ts`      | `IOT_API_URL` (in-situ soil sensors)                             | `IOT-SENSORS`    | `IoTSensorReadingSchema`, `IotProjectConfigSchema`        |
 | Blue carbon    | `oracle/blue-carbon-adapter.ts` | `BLUE_CARBON_API_URL` (mangrove/seagrass/saltmarsh plot surveys) | `BLUE-CARBON`    | `BlueCarbonSurveySchema`, `BlueCarbonProjectConfigSchema` |
 
-All four validate their inputs **before** producing a report; a response that violates its schema raises a typed error (`VerraSchemaError`, `SatelliteSchemaError`, `IotSchemaError`, `BlueCarbonSchemaError`) and no report is emitted. The output of every adapter is validated against `OracleReportSchema` (see `ipfs/schemas/oracle-report.schema.json`) before it is returned.
+All four validate their inputs **before** producing a report; a response that violates its schema raises a typed error (`VerraSchemaError`, `SatelliteSchemaError`, `IotSchemaError`, `BlueCarbonSchemaError`) and no report is emitted. The output of every adapter is validated against `OracleReportSchema` (see `ipfs/schemas/oracle-report.schema.json`) before it is returned. In the NestJS API, `IOT-SENSORS` is registered via `IotProvider` (`api/src/oracle/providers/iot.provider.ts`) and can be enabled during oracle polling via `ENABLE_IOT_PROVIDER=true`.
 
 ### On-Chain Pre-flight Validation
 
@@ -769,6 +770,15 @@ cd frontend && npm install && cd ..
 cd contracts && cargo build --release && cd ..
 ```
 
+### Contributor Diagnostics
+
+Before starting development or opening your first PR, it is highly recommended to run the read-only diagnostics script. This verifies your local environment, Node.js version, environment variables, Redis connectivity, and Postgres connectivity. It provides actionable remediation steps for any failures.
+
+```bash
+cd api
+npm run diagnostics
+```
+
 ### Quick Start (Testnet)
 
 ```bash
@@ -789,6 +799,52 @@ cd frontend && ng serve
 open http://localhost:4200
 ```
 
+### Local Development Fixtures (Seeding)
+
+The API serves list/detail pages (dashboard, projects, bonds, marketplace,
+oracle) from a Redis cache that is normally populated by on-chain contract
+calls. To develop without deployed contracts, you can seed the local cache with
+a **deterministic, realistic fixture set** so every page renders meaningful data.
+
+```bash
+# Within the api package:
+cd api
+
+# 1. Ensure Redis is running (see docker-compose.yml).
+# 2. Apply the fixtures (idempotent — skips if already seeded):
+npm run seed
+
+# Re-apply fixtures after changing them (overwrites seed keys):
+npm run seed -- --force
+
+# Clear all seeded keys and the seed marker:
+npm run seed -- --reset
+```
+
+What gets seeded (all values are stable and repeatable across runs):
+
+| Domain          | Fixtures                                                                   |
+| --------------- | -------------------------------------------------------------------------- |
+| Users/roles     | 4 users covering admin, developer, investor, oracle-provider               |
+| Projects        | 6 projects spanning every status and 4 credit methodologies                |
+| Bonds           | 9 bonds across Active/Matured/**Defaulted** and all credit types           |
+| Marketplace     | 6 orders covering every order status                                        |
+| Oracle reports  | 11 reports across all report statuses, including one anchored to "now" so it is unambiguously overdue |
+| Authorizations  | 3 delegated grants: active, expired-but-uncleaned, and revoked             |
+
+The seed is idempotent (guarded by a `seed:verdant:marker` Redis key) and never
+duplicates or clobbers unrelated keys. See `api/src/seed/fixtures.ts` for the
+data and `api/scripts/seed.ts` for the CLI entry point.
+
+**Edge cases covered for contributor testing** (issue #304): a **failed
+settlement** (the Defaulted bond), **revoked access** (the revoked
+authorization grant), an **overdue workflow** (the oracle report anchored to
+`now` rather than the fixed fixture date), and **historical records** (the
+matured legacy bond, created years before the fixture's anchor date). A
+dedicated test suite, `api/src/seed/fixtures.consistency.spec.ts`, checks the
+dataset's internal consistency (no dangling foreign ids, no duplicate ids,
+correctly ordered timestamps) and that it is byte-identical across two builds.
+
 ---
 
 ## 🔧 Environment Variables
@@ -801,6 +857,8 @@ STELLAR_NETWORK=testnet                        # testnet | mainnet
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 STELLAR_PUBLIC_KEY=G...                        # Admin public key (used by deploy scripts)
+STELLAR_AUTH_SECRET_KEY=S...                    # Server key used to sign SEP-10 challenges
+STELLAR_HOME_DOMAIN=localhost:3000             # Domain embedded in the SEP-10 challenge
 
 # ── Signer Keys (used by the API to build transactions) ──────────
 ADMIN_SECRET_KEY=S...                          # Issuer/admin secret key
@@ -843,6 +901,21 @@ PORT=3000
 NODE_ENV=development
 LOG_LEVEL=debug
 ```
+
+### Wallet Authentication
+
+The login flow uses a SEP-10-style challenge transaction. The API creates a
+short-lived Stellar transaction containing a random nonce in a `ManageData`
+operation, binds it to the configured network passphrase and home domain, and
+signs it with `STELLAR_AUTH_SECRET_KEY`. Freighter signs that transaction
+envelope and returns base64 XDR. The API verifies that the envelope matches the
+stored challenge and contains valid signatures from both the server and the
+requested wallet before issuing a JWT. Raw Ed25519 signatures and envelopes
+from another Stellar network are rejected.
+
+`STELLAR_AUTH_SECRET_KEY` must belong to the server authentication account and
+must be kept private. `STELLAR_HOME_DOMAIN` should be the public host serving
+the authentication endpoint in deployed environments.
 
 ---
 
@@ -1038,6 +1111,18 @@ npm run test:e2e
 npm run test:cov
 ```
 
+### End-to-End Lifecycle Testing
+
+The repository includes a complete end-to-end lifecycle test harness that runs the full happy-path of the protocol (project registration, approval, bond issuance, subscription, oracle reporting, coupon distribution, DEX trading, and redemption) on Stellar Testnet.
+
+To run the full E2E test with a single command:
+
+```bash
+./scripts/run-lifecycle-test.sh
+```
+
+This script automatically generates temporary wallets, funds them via Friendbot, builds and deploys the Soroban contracts, and executes the Jest test suite.
+
 ### Frontend
 
 ```bash
@@ -1084,6 +1169,42 @@ docker-compose up -d
 # View logs
 docker-compose logs -f api
 ```
+
+### Reproducible Builds
+
+Releases must be reproducible: the same commit must yield the same Lockfiles,
+WASM contract artifacts, and Node bundles on any machine or CI runner. A
+committed, in-sync lockfile is the primary guarantee; drifting lockfiles or
+uncommitted dependency resolutions are the leading cause of unreproducible
+builds.
+
+Run the self-contained reproducibility gate:
+
+```bash
+# Validates lockfile presence + sync for api/frontend/oracle, Cargo.lock for
+# contracts, and (when the soroban CLI is available) contract WASM checksums:
+./scripts/reproducibility/verify.sh
+```
+
+What each check enforces, and how to regenerate baselines:
+
+| Check                                                     | Script                                                        | Baseline to commit              |
+| --------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------- |
+| Node lockfiles present & in sync (`npm ci --dry-run`)     | `scripts/reproducibility/lockfiles.sh`                        | `api|frontend|oracle/package-lock.json` |
+| Rust workspace pinned                                     | `scripts/reproducibility/lockfiles.sh`                        | `contracts/Cargo.lock`          |
+| Contract WASM artifact checksums                          | `scripts/reproducibility/wasm-checksums.sh --verify`          | `contracts/checksums.sha256`    |
+
+Regenerating the contract WASM checksum baseline (only when artifacts
+intentionally change):
+
+```bash
+./scripts/reproducibility/wasm-checksums.sh --generate
+```
+
+The CI pipeline runs `verify.sh` on every push/PR, so a commit that breaks
+reproducibility (e.g. an out-of-sync lockfile) is blocked before merge, and
+the `contracts` job re-verifies WASM checksums whenever the soroban CLI is
+available in the build environment.
 
 ---
 

@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, ChangeDetectionStrategy, signal } from '@angular/core';
+import { Component, inject, OnInit, ChangeDetectionStrategy, computed, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule, Router, ActivatedRoute } from '@angular/router';
 import { AbstractControl, FormBuilder, FormGroup, ReactiveFormsModule, ValidationErrors, ValidatorFn, Validators } from '@angular/forms';
@@ -6,6 +6,8 @@ import { ApiService } from '../../shared/services/api.service';
 import { WalletService } from '../../auth/wallet.service';
 import { QuoteBalanceComponent } from '../../shared/components/quote-balance/quote-balance.component';
 import { HeldBond } from '../../shared/interfaces/bond.interface';
+import { appErrorMessage } from '../../shared/errors/api-error';
+import { PendingTransactionsService } from '../../shared/services/pending-transactions.service';
 
 @Component({
   selector: 'app-marketplace-sell',
@@ -17,7 +19,10 @@ import { HeldBond } from '../../shared/interfaces/bond.interface';
       <h1 class="page-title">List Tokens for Sale</h1>
 
       @if (error()) {
-        <div class="error-banner">{{ error() }}</div>
+        <div class="error-banner" role="alert" aria-live="assertive">
+          <span>{{ error() }}</span>
+          <button type="button" class="error-dismiss" aria-label="Dismiss error" (click)="dismissError()">×</button>
+        </div>
       }
 
       @if (walletService.isConnected()) {
@@ -35,6 +40,11 @@ import { HeldBond } from '../../shared/interfaces/bond.interface';
               <option [ngValue]="bond.id">Bond #{{ bond.id }} — {{ bond.creditType }}</option>
             }
           </select>
+          @if (bonds().length === 0) {
+            <div class="empty-state">
+              No bond tranches held — <a routerLink="/bonds">browse and subscribe</a>.
+            </div>
+          }
           @if (form.get('bondId')?.invalid && form.get('bondId')?.touched) {
             <span class="form-error">Select a bond</span>
           }
@@ -78,7 +88,7 @@ import { HeldBond } from '../../shared/interfaces/bond.interface';
 
         <div class="form-actions">
           <a class="btn btn-outline" routerLink="/marketplace">Cancel</a>
-          <button type="submit" class="btn btn-primary" [disabled]="form.invalid || submitting()">
+          <button type="submit" class="btn btn-primary" [disabled]="form.invalid || submitting() || !hasSelectedBond()">
             {{ submitting() ? 'Listing...' : 'List for Sale' }}
           </button>
         </div>
@@ -90,7 +100,10 @@ import { HeldBond } from '../../shared/interfaces/bond.interface';
     .back-link { display: inline-block; margin-bottom: 16px; color: #3b82f6; text-decoration: none; font-size: 0.875rem; }
     .back-link:hover { text-decoration: underline; }
     .page-title { font-size: 1.5rem; font-weight: 700; margin-bottom: 24px; }
-    .error-banner { background: #fef2f2; color: #ef4444; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.875rem; }
+    .error-banner { background: #fef2f2; color: #991b1b; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.875rem; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .error-dismiss { border: 0; background: transparent; color: inherit; font-size: 1.1rem; line-height: 1; cursor: pointer; }
+    .empty-state { margin-top: 8px; padding: 12px; border: 1px dashed #d1d5db; border-radius: 8px; color: #4b5563; font-size: 0.875rem; }
+    .empty-state a { color: #2563eb; font-weight: 600; }
     .quote-section { margin-bottom: 24px; }
     .sell-form { background: #fff; border-radius: 12px; padding: 32px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
     .form-group { display: flex; flex-direction: column; margin-bottom: 20px; flex: 1; }
@@ -114,12 +127,16 @@ export class MarketplaceSellComponent implements OnInit {
   private readonly apiService = inject(ApiService);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
+  private readonly pendingTx = inject(PendingTransactionsService);
   readonly walletService = inject(WalletService);
 
   readonly bonds = signal<HeldBond[]>([]);
   readonly selectedBalance = signal<number | null>(null);
   readonly submitting = signal(false);
   readonly error = signal('');
+  readonly hasSelectedBond = computed(() =>
+    this.bonds().some((bond) => bond.id === Number(this.form?.get('bondId')?.value)),
+  );
 
   form: FormGroup = this.fb.group({
     bondId: [null, Validators.required],
@@ -148,6 +165,11 @@ export class MarketplaceSellComponent implements OnInit {
         this.form.get('bondId')?.updateValueAndValidity();
         this.form.get('amount')?.updateValueAndValidity();
       },
+      error: (err) => {
+        this.bonds.set([]);
+        this.selectedBalance.set(null);
+        this.error.set(appErrorMessage(err, 'Failed to load held bonds'));
+      },
     });
   }
 
@@ -162,11 +184,15 @@ export class MarketplaceSellComponent implements OnInit {
 
   private updateSelectedBalance(bondId: unknown): void {
     const heldBond = this.bonds().find((bond) => bond.id === Number(bondId));
-    this.selectedBalance.set(heldBond?.balance ?? null);
+    this.selectedBalance.set(heldBond?.balance != null ? Number(heldBond.balance) : null);
   }
 
   onSubmit(): void {
-    if (this.form.invalid) return;
+    // Guards against a duplicate listing being submitted while one is
+    // already in flight (#91): the submit button's [disabled] binding covers
+    // a click, but a native form submit (e.g. pressing Enter) fires
+    // (ngSubmit) regardless of a button's disabled attribute.
+    if (this.form.invalid || this.submitting() || !this.hasSelectedBond()) return;
     this.submitting.set(true);
     this.error.set('');
 
@@ -174,13 +200,18 @@ export class MarketplaceSellComponent implements OnInit {
     if (!formValue.expiresAfterSeconds) delete formValue.expiresAfterSeconds;
 
     this.apiService.listBondTokens(formValue).subscribe({
-      next: () => {
+      next: (res) => {
+        this.pendingTx.register(res.transactionHash, 'list');
         this.router.navigate(['/marketplace']);
       },
       error: (err) => {
-        this.error.set(err.error?.detail || err.message || 'Failed to list tokens');
+        this.error.set(appErrorMessage(err, 'Failed to list tokens'));
         this.submitting.set(false);
       },
     });
+  }
+
+  dismissError(): void {
+    this.error.set('');
   }
 }
